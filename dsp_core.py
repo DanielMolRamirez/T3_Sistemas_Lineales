@@ -28,9 +28,12 @@ def procesar_ecualizador(x, fs, ganancias_db):
         f_high = min(f_high, nyquist - 1)
         
         Wn = [f_low / nyquist, f_high / nyquist]
-        b, a = sig.butter(4, Wn, btype='bandpass')
         
-        y_filtrado = sig.filtfilt(b, a, x)
+        # SOLUCIÓN DSP: Usar 'sos' (Second-Order Sections) para estabilidad numérica
+        sos = sig.butter(4, Wn, btype='bandpass', output='sos')
+        
+        # Filtramos usando sosfiltfilt en lugar de filtfilt
+        y_filtrado = sig.sosfiltfilt(sos, x)
         y_eq += y_filtrado * ganancia_lineal
         
     return y_eq
