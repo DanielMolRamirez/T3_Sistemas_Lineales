@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from math import gcd
-from typing import Mapping, Sequence
+from typing import Mapping
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -20,13 +20,13 @@ BANDAS_EQ = [
 ]
 
 
-def _como_vector_float(x):
-    """Convierte la entrada en una señal mono float64."""
+def _como_vector_float(x: np.ndarray) -> np.ndarray:
+    """Convierte la entrada en un vector mono float64 finito."""
 
     senal = np.asarray(x)
 
     if senal.ndim == 2:
-        senal = senal.mean(axis=1)
+        senal = np.mean(senal, axis=1)
     elif senal.ndim != 1:
         raise ValueError("La señal debe ser mono o estéreo.")
 
@@ -38,14 +38,14 @@ def _como_vector_float(x):
         neginf=0.0,
     )
 
-    if senal.size == 0:
-        raise ValueError("La señal está vacía.")
+    if senal.size < 2:
+        raise ValueError("La señal debe contener al menos dos muestras.")
 
     return senal
 
 
-def pcm_a_float(datos):
-    """Convierte datos PCM o flotantes de un WAV a float64."""
+def pcm_a_float(datos: np.ndarray) -> np.ndarray:
+    """Convierte PCM o flotantes WAV a float64."""
 
     x = np.asarray(datos)
 
@@ -73,8 +73,8 @@ def pcm_a_float(datos):
     raise TypeError(f"Tipo WAV no compatible: {x.dtype}")
 
 
-def _reducir_factores(L, M):
-    """Reduce la razón L/M mediante el máximo común divisor."""
+def reducir_factores(L: int, M: int) -> tuple[int, int]:
+    """Reduce L/M mediante el máximo común divisor."""
 
     if not isinstance(L, (int, np.integer)):
         raise TypeError("L debe ser entero.")
@@ -88,21 +88,18 @@ def _reducir_factores(L, M):
 
 
 def cambiar_tasa(
-    x,
-    L,
-    M,
+    x: np.ndarray,
+    L: int,
+    M: int,
     *,
-    num_taps=101,
-    margen_corte=0.90,
-    devolver_info=False,
+    num_taps: int = 101,
+    margen_corte: float = 0.90,
+    devolver_info: bool = False,
 ):
-    """
-    Conversión racional:
-        x[n] -> expansión L -> FIR -> decimación M -> y[n]
-    """
+    """Conversión racional mediante filtrado polifásico."""
 
     senal = _como_vector_float(x)
-    Lr, Mr = _reducir_factores(L, M)
+    Lr, Mr = reducir_factores(L, M)
 
     if num_taps < 3 or num_taps % 2 == 0:
         raise ValueError("num_taps debe ser impar y al menos 3.")
@@ -111,11 +108,11 @@ def cambiar_tasa(
 
     if Lr == 1 and Mr == 1:
         info = {
-            "L_reducido": Lr,
-            "M_reducido": Mr,
+            "L_reducido": 1,
+            "M_reducido": 1,
             "corte_normalizado": 1.0,
             "num_taps": 1,
-            "muestras_esperadas": len(senal),
+            "muestras_esperadas": senal.size,
         }
         return (senal.copy(), info) if devolver_info else senal.copy()
 
@@ -136,14 +133,14 @@ def cambiar_tasa(
         window=h0,
         padtype="line",
     )
-
     y = np.asarray(y, dtype=np.float64)
-    muestras_esperadas = int(np.ceil(len(senal) * Lr / Mr))
 
-    if len(y) > muestras_esperadas:
+    muestras_esperadas = int(np.ceil(senal.size * Lr / Mr))
+
+    if y.size > muestras_esperadas:
         y = y[:muestras_esperadas]
-    elif len(y) < muestras_esperadas:
-        y = np.pad(y, (0, muestras_esperadas - len(y)))
+    elif y.size < muestras_esperadas:
+        y = np.pad(y, (0, muestras_esperadas - y.size))
 
     info = {
         "L_reducido": Lr,
@@ -156,8 +153,8 @@ def cambiar_tasa(
     return (y, info) if devolver_info else y
 
 
-def _ganancias_a_lista(ganancias_db):
-    """Acepta lista o diccionario de ganancias."""
+def _ganancias_a_lista(ganancias_db) -> list[float]:
+    """Acepta una lista de seis ganancias o un diccionario."""
 
     if isinstance(ganancias_db, Mapping):
         valores = [
@@ -167,9 +164,8 @@ def _ganancias_a_lista(ganancias_db):
     else:
         valores = [float(valor) for valor in ganancias_db]
 
-    if len(valores) != 6:
+    if len(valores) != len(BANDAS_EQ):
         raise ValueError("Se requieren exactamente seis ganancias.")
-
     if not all(np.isfinite(valor) for valor in valores):
         raise ValueError("Las ganancias deben ser finitas.")
 
@@ -177,25 +173,23 @@ def _ganancias_a_lista(ganancias_db):
 
 
 def procesar_ecualizador(
-    x,
-    fs,
+    x: np.ndarray,
+    fs: float,
     ganancias_db,
     *,
-    orden=4,
-    margen_nyquist=0.98,
-    devolver_info=False,
+    orden: int = 4,
+    margen_nyquist: float = 0.98,
+    devolver_info: bool = False,
 ):
-    """
-    Ecualizador transparente a 0 dB:
-
-        z[n] = y[n] + sum_i (G_i - 1)b_i[n]
-    """
+    """Ecualizador transparente a 0 dB."""
 
     senal = _como_vector_float(x)
     ganancias = _ganancias_a_lista(ganancias_db)
 
-    if fs <= 0:
-        raise ValueError("fs debe ser positiva.")
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError("fs debe ser positiva y finita.")
+    if orden < 1:
+        raise ValueError("El orden debe ser mayor o igual que uno.")
     if not 0.0 < margen_nyquist < 1.0:
         raise ValueError("margen_nyquist debe pertenecer a (0, 1).")
 
@@ -218,7 +212,7 @@ def procesar_ecualizador(
                     "Intervalo utilizado [Hz]": "—",
                     "Estado": "Desactivada",
                     "Observación": (
-                        "La banda comienza por encima del límite de Nyquist."
+                        "La banda comienza por encima de Nyquist."
                     ),
                 }
             )
@@ -261,7 +255,6 @@ def procesar_ecualizador(
             }
         )
 
-        # Con 0 dB no se modifica la trayectoria directa.
         if np.isclose(ganancia_db, 0.0, atol=1e-12):
             continue
 
@@ -287,12 +280,14 @@ def procesar_ecualizador(
         z += (ganancia_lineal - 1.0) * banda_filtrada
 
     z = np.nan_to_num(z, nan=0.0, posinf=0.0, neginf=0.0)
-
     return (z, estados) if devolver_info else z
 
 
-def normalizar_audio(x, pico_objetivo=0.98):
-    """Normaliza una copia para reproducción o descarga."""
+def normalizar_audio(
+    x: np.ndarray,
+    pico_objetivo: float = 0.98,
+) -> tuple[np.ndarray, float]:
+    """Normaliza una copia para reproducción."""
 
     senal = _como_vector_float(x)
 
@@ -308,12 +303,15 @@ def normalizar_audio(x, pico_objetivo=0.98):
     return senal * factor, factor
 
 
-def metricas_transparencia(referencia, estimada):
-    """Mide el error cuando el ecualizador está en 0 dB."""
+def metricas_transparencia(
+    referencia: np.ndarray,
+    estimada: np.ndarray,
+) -> dict[str, float]:
+    """Mide el error del ecualizador plano."""
 
     a = _como_vector_float(referencia)
     b = _como_vector_float(estimada)
-    n = min(len(a), len(b))
+    n = min(a.size, b.size)
 
     error = b[:n] - a[:n]
     mse = float(np.mean(error**2))
@@ -333,28 +331,30 @@ def metricas_transparencia(referencia, estimada):
     }
 
 
-def _reducir_puntos(t, x, max_puntos=100000):
-    """Reduce los puntos dibujados, no los procesados."""
+def _reducir_puntos(
+    tiempo: np.ndarray,
+    senal: np.ndarray,
+    max_puntos: int = 100_000,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reduce solo la cantidad de puntos dibujados."""
 
-    paso = max(1, int(np.ceil(len(x) / max_puntos)))
-    return t[::paso], x[::paso]
+    paso = max(1, int(np.ceil(senal.size / max_puntos)))
+    return tiempo[::paso], senal[::paso]
 
 
 def generar_graficas_tiempo(
-    x,
-    y,
-    z,
-    fs_x,
-    fs_y,
-    fs_z,
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    fs_x: float,
+    fs_y: float,
+    fs_z: float,
     *,
-    modo="Vista completa",
-    inicio_detalle_s=1.0,
-    muestras_detalle=100,
+    modo: str = "Vista completa",
+    inicio_detalle_s: float = 1.0,
+    muestras_detalle: int = 100,
 ):
-    """
-    Tres señales temporales en tres subplots separados.
-    """
+    """Tres señales temporales en subgráficas separadas."""
 
     senales = [
         (_como_vector_float(x), fs_x, "x[n] — Señal original"),
@@ -368,8 +368,8 @@ def generar_graficas_tiempo(
     if modo == "Detalle de muestras":
         for eje, (senal, fs, titulo) in zip(ejes, senales):
             i0 = int(round(inicio_detalle_s * fs))
-            i0 = min(max(i0, 0), max(len(senal) - 1, 0))
-            i1 = min(len(senal), i0 + muestras_detalle)
+            i0 = min(max(i0, 0), max(senal.size - 1, 0))
+            i1 = min(senal.size, i0 + muestras_detalle)
 
             indices = np.arange(i0, i1)
             tiempo_ms = 1000.0 * indices / fs
@@ -379,21 +379,16 @@ def generar_graficas_tiempo(
                 senal[i0:i1],
                 basefmt=" ",
             )
+            eje.set_title(f"{titulo} — {i1 - i0} muestras")
             eje.set_xlabel("Tiempo [ms]")
-            eje.set_title(
-                f"{titulo} — {i1 - i0} muestras"
-            )
             eje.set_ylabel("Amplitud")
             eje.grid(True)
     else:
         for eje, (senal, fs, titulo) in zip(ejes, senales):
-            tiempo = np.arange(len(senal), dtype=np.float64) / fs
-            tiempo_grafico, senal_grafica = _reducir_puntos(
-                tiempo,
-                senal,
-            )
+            tiempo = np.arange(senal.size, dtype=np.float64) / fs
+            tg, sg = _reducir_puntos(tiempo, senal)
 
-            eje.plot(tiempo_grafico, senal_grafica)
+            eje.plot(tg, sg)
             eje.set_title(titulo)
             eje.set_xlabel("Tiempo [s]")
             eje.set_ylabel("Amplitud")
@@ -402,21 +397,32 @@ def generar_graficas_tiempo(
     return fig
 
 
-def _nfft_adecuado(longitud):
+def _nfft_adecuado(longitud: int) -> int:
     """Escoge una potencia de dos razonable."""
 
     objetivo = max(4096, min(int(longitud), 65536))
     return 1 << int(np.ceil(np.log2(objetivo)))
 
 
-def _espectro_db(x, fs, bilateral, minimo_db):
+def _espectro_db(
+    x: np.ndarray,
+    fs: float,
+    *,
+    bilateral: bool,
+    minimo_db: float,
+) -> tuple[np.ndarray, np.ndarray]:
     """FFT normalizada mediante ventana Hann."""
 
     senal = _como_vector_float(x)
     senal = senal - np.mean(senal)
 
-    nfft = _nfft_adecuado(len(senal))
-    ventana = np.hanning(len(senal))
+    nfft = _nfft_adecuado(senal.size)
+
+    if senal.size < 4:
+        ventana = np.ones(senal.size)
+    else:
+        ventana = np.hanning(senal.size)
+
     normalizador = max(float(np.sum(ventana)), EPS)
 
     if bilateral:
@@ -433,7 +439,7 @@ def _espectro_db(x, fs, bilateral, minimo_db):
         espectro = np.fft.rfft(senal * ventana, n=nfft)
         magnitud = np.abs(espectro) / normalizador
 
-        if len(magnitud) > 2:
+        if magnitud.size > 2:
             magnitud[1:-1] *= 2.0
 
         eje = np.fft.rfftfreq(nfft, d=1.0 / fs)
@@ -447,20 +453,18 @@ def _espectro_db(x, fs, bilateral, minimo_db):
 
 
 def generar_graficas_frecuencia(
-    x,
-    y,
-    z,
-    fs_x,
-    fs_y,
-    fs_z,
+    x: np.ndarray,
+    y: np.ndarray,
+    z: np.ndarray,
+    fs_x: float,
+    fs_y: float,
+    fs_z: float,
     *,
-    modo="Frecuencia digital normalizada",
-    minimo_db=-120.0,
-    frecuencia_maxima_hz=None,
+    modo: str = "Frecuencia digital normalizada",
+    minimo_db: float = -120.0,
+    frecuencia_maxima_hz: float | None = None,
 ):
-    """
-    Tres espectros en tres subplots separados.
-    """
+    """Tres espectros en subgráficas separadas."""
 
     senales = [
         (_como_vector_float(x), fs_x, "Espectro de x[n]"),
@@ -530,16 +534,20 @@ def generar_graficas_frecuencia(
 
 
 def generar_respuesta_ecualizador(
-    fs,
+    fs: float,
     ganancias_db,
     *,
-    orden=4,
-    margen_nyquist=0.98,
-    puntos=8192,
+    orden: int = 4,
+    margen_nyquist: float = 0.98,
+    puntos: int = 8192,
 ):
     """Respuesta total aproximada del ecualizador."""
 
     ganancias = _ganancias_a_lista(ganancias_db)
+
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError("fs debe ser positiva y finita.")
+
     frecuencias = np.linspace(
         0.0,
         fs / 2.0,
@@ -549,7 +557,7 @@ def generar_respuesta_ecualizador(
     respuesta = np.ones(puntos, dtype=np.complex128)
     limite_seguro = margen_nyquist * fs / 2.0
 
-    for (nombre, f_low, f_high), ganancia_db in zip(
+    for (_, f_low, f_high), ganancia_db in zip(
         BANDAS_EQ,
         ganancias,
     ):
@@ -560,7 +568,6 @@ def generar_respuesta_ecualizador(
 
         if f_high_usada <= f_low:
             continue
-
         if np.isclose(ganancia_db, 0.0, atol=1e-12):
             continue
 
@@ -579,8 +586,6 @@ def generar_respuesta_ecualizador(
         )
 
         G = 10.0 ** (ganancia_db / 20.0)
-
-        # sosfiltfilt equivale aproximadamente a |H|^2.
         respuesta += (G - 1.0) * (np.abs(H) ** 2)
 
     respuesta_db = 20.0 * np.log10(
