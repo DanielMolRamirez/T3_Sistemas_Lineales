@@ -1,512 +1,146 @@
-from __future__ import annotations
-
-from io import BytesIO
-from pathlib import Path
-
-import numpy as np
 import streamlit as st
+import numpy as np
 from scipy.io import wavfile
+import os
+import dsp_core as dsp 
 
-import dsp_core as dsp
-
-
-# ============================================================
-# CONFIGURACIÓN GENERAL
-# ============================================================
-st.set_page_config(
-    page_title="DSP Audio - Sistemas Lineales",
-    page_icon="🎵",
-    layout="wide",
-)
-
-BASE_DIR = Path(__file__).resolve().parent
-AUDIO_DIR = BASE_DIR / "audio_files"
-MAX_MUESTRAS_SALIDA = 5_000_000
+# --- CONFIGURACION INICIAL ---
+st.set_page_config(page_title="DSP Audio - Proyecto Sistemas Lineales", layout="wide")
 
 st.title("Conversor de Frecuencia de Muestreo y Ecualizador")
 st.markdown("**Desarrollado por:** Daniel Molina, Santiago Zumba y Juan Pacheco")
-st.markdown("### Universidad de Cuenca — Sistemas Lineales y Señales")
+st.markdown("### Universidad de Cuenca - Sistemas Lineales y Señales")
 
-
-@st.cache_data(show_spinner=False)
-def decodificar_wav(contenido: bytes) -> tuple[int, np.ndarray]:
-    """Lee bytes WAV, convierte a mono y devuelve float64."""
-
-    fs, datos = wavfile.read(BytesIO(contenido))
-    datos = dsp.pcm_a_float(datos)
-
-    if datos.ndim == 2:
-        datos = np.mean(datos, axis=1)
-    elif datos.ndim != 1:
-        raise ValueError("El archivo WAV debe ser mono o estéreo.")
-
-    audio = np.asarray(datos, dtype=np.float64)
-    audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
-
-    if fs <= 0:
-        raise ValueError("La frecuencia de muestreo del WAV no es válida.")
-    if audio.size < 2:
-        raise ValueError("El WAV no contiene suficientes muestras.")
-
-    return int(fs), audio
-
-
-def convertir_a_wav_bytes(senal: np.ndarray, fs: float) -> bytes:
-    """Convierte una señal flotante en un WAV PCM de 16 bits."""
-
-    x = np.asarray(senal, dtype=np.float64)
-    x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-    x = np.clip(x, -1.0, 1.0)
-    pcm = np.round(x * 32767.0).astype(np.int16)
-
-    memoria = BytesIO()
-    wavfile.write(memoria, int(round(fs)), pcm)
-    return memoria.getvalue()
-
-
-def detener_con_error(mensaje: str, error: Exception | None = None) -> None:
-    """Muestra un error claro en la interfaz y detiene la ejecución."""
-
-    st.error(mensaje)
-    if error is not None:
-        with st.expander("Detalles técnicos"):
-            st.exception(error)
-    st.stop()
-
-
-# ============================================================
-# 1. SELECCIÓN DE LA SEÑAL
-# ============================================================
+# --- PANEL LATERAL (CONTROLES) ---
 with st.sidebar:
-    st.header("1. Selección de la señal x[n]")
-
-    if AUDIO_DIR.exists():
-        archivos_repo = sorted(
-            [
-                archivo.name
-                for archivo in AUDIO_DIR.iterdir()
-                if archivo.is_file() and archivo.suffix.lower() == ".wav"
-            ],
-            key=str.lower,
-        )
-    else:
-        archivos_repo = []
-
+    st.header("1. Seleccion de la Señal x[n]")
+    
+    # Leemos la carpeta local para que el profesor pueda elegir rapidamente audios ya probados
+    carpeta_audios = "audio_files"
+    archivos_repo = []
+    if os.path.exists(carpeta_audios):
+        archivos_repo = [f for f in os.listdir(carpeta_audios) if f.endswith(".wav")]
+    
     opcion_archivo = st.selectbox(
-        "Escoge un audio del repositorio:",
-        ["— Subir un archivo nuevo —"] + archivos_repo,
-        key="selector_audio_repo",
+        "Escoge un audio del repositorio:", 
+        ["-- Subir un archivo nuevo --"] + archivos_repo
     )
-
-    if opcion_archivo == "— Subir un archivo nuevo —":
-        archivo_subido = st.file_uploader(
-            "O sube tu propio archivo WAV",
-            type=["wav"],
-            key="cargador_wav",
-        )
-        if archivo_subido is None:
-            contenido_audio = None
-            identificador_audio = "sin_audio"
-        else:
-            contenido_audio = archivo_subido.getvalue()
-            identificador_audio = (
-                f"subido_{archivo_subido.name}_{len(contenido_audio)}"
-            )
+    
+    # Damos la opcion de subir uno en vivo por si el profe quiere probar con su propio audio
+    if opcion_archivo == "-- Subir un archivo nuevo --":
+        archivo_a_procesar = st.file_uploader("O sube tu propio archivo .wav", type=["wav"])
     else:
-        ruta_audio = AUDIO_DIR / opcion_archivo
-        try:
-            contenido_audio = ruta_audio.read_bytes()
-        except OSError as error:
-            detener_con_error(
-                f"No se pudo abrir {opcion_archivo}.",
-                error,
-            )
-        identificador_audio = (
-            f"repo_{opcion_archivo}_{len(contenido_audio)}"
-        )
-
-
-if contenido_audio is None:
-    st.info(
-        "Selecciona un WAV de la carpeta audio_files o sube un archivo "
-        "desde el panel lateral."
-    )
-    st.stop()
-
-
-try:
-    fs_original, audio_completo = decodificar_wav(contenido_audio)
-except (ValueError, TypeError, OSError) as error:
-    detener_con_error("No fue posible leer el archivo WAV.", error)
-
-
-duracion_total = audio_completo.size / fs_original
-
-if not np.isfinite(duracion_total) or duracion_total <= 0:
-    detener_con_error("La duración calculada del audio no es válida.")
-
-
-# ============================================================
-# 2. VENTANA Y PARÁMETROS DSP
-# ============================================================
-with st.sidebar:
+        archivo_a_procesar = os.path.join(carpeta_audios, opcion_archivo)
+    
     st.divider()
-    st.header("2. Ventana de análisis")
-    st.caption(
-        "Mueve los dos extremos para escoger el inicio y el final."
-    )
-
-    fin_predeterminado = min(10.0, duracion_total)
-
-    if duracion_total <= 1.0:
-        paso_ventana = 0.01
-    elif duracion_total <= 20.0:
-        paso_ventana = 0.10
-    else:
-        paso_ventana = 0.50
-
-    inicio_seg, fin_seg = st.slider(
-        "Ventana (segundos)",
-        min_value=0.0,
-        max_value=float(duracion_total),
-        value=(0.0, float(fin_predeterminado)),
-        step=float(paso_ventana),
-        key=f"ventana_{identificador_audio}",
-    )
-
-    st.caption(
-        f"Selección: {inicio_seg:.2f} s → {fin_seg:.2f} s "
-        f"({fin_seg - inicio_seg:.2f} s)"
-    )
+    
+    st.header("2. Analisis por Ventanas")
+    st.caption("Recorta un segmento para no saturar la memoria al calcular la FFT")
+    inicio_seg, fin_seg = st.slider("Ventana (segundos):", 0.0, 100.0, (0.0, 10.0), step=0.5)
 
     st.divider()
-    st.header("3. Bloque SRC")
-
-    st.latex(
-        r"x[n]\longrightarrow \uparrow L"
-        r"\longrightarrow h[n]\longrightarrow \downarrow M"
-        r"\longrightarrow y[n]"
-    )
-
-    col_l, col_m = st.columns(2)
-
-    with col_l:
-        factor_L = int(
-            st.number_input(
-                "Expansión L",
-                min_value=1,
-                max_value=20,
-                value=1,
-                step=1,
-                key="factor_L",
-            )
-        )
-
-    with col_m:
-        factor_M = int(
-            st.number_input(
-                "Decimación M",
-                min_value=1,
-                max_value=20,
-                value=1,
-                step=1,
-                key="factor_M",
-            )
-        )
-
-    with st.expander("Configuración avanzada del FIR"):
-        num_taps = int(
-            st.slider(
-                "Número de coeficientes",
-                min_value=31,
-                max_value=401,
-                value=101,
-                step=2,
-                key="num_taps",
-            )
-        )
-        margen_corte = float(
-            st.slider(
-                "Margen de corte",
-                min_value=0.75,
-                max_value=0.99,
-                value=0.90,
-                step=0.01,
-                key="margen_corte",
-            )
-        )
-
+    
+    st.header("3. Bloque SRC (Conversor L/M)")
+    # Mostramos la teoria del conversor de tasa multiple
+    st.latex(r"y[n] = x_{(\uparrow L \downarrow M)}[n]")
+    col1, col2 = st.columns(2)
+    with col1:
+        factor_L = st.number_input("Expansion (L):", min_value=1, value=1, step=1)
+    with col2:
+        factor_M = st.number_input("Decimacion (M):", min_value=1, value=1, step=1)
+        
     st.divider()
-    st.header("4. Ecualizador [dB]")
+    
+    st.header("4. Bloque EQ (Ganancias en dB)")
+    # Sliders para las 6 bandas requeridas. Se ajustan en tiempo real.
+    sub_bass = st.slider("Sub-Bass (16 - 60 Hz)", -12.0, 12.0, 0.0)
+    bass = st.slider("Bass (60 - 250 Hz)", -12.0, 12.0, 0.0)
+    low_mids = st.slider("Low Mids (250 - 2k Hz)", -12.0, 12.0, 0.0)
+    high_mids = st.slider("High Mids (2k - 4k Hz)", -12.0, 12.0, 0.0)
+    presence = st.slider("Presence (4k - 6k Hz)", -12.0, 12.0, 0.0)
+    brilliance = st.slider("Brilliance (6k - 16k Hz)", -12.0, 12.0, 0.0)
 
-    ganancias = [
-        st.slider(
-            "Sub-Bass (16–60 Hz)",
-            -12.0, 12.0, 0.0, 0.25,
-            key="eq_sub_bass",
-        ),
-        st.slider(
-            "Bass (60–250 Hz)",
-            -12.0, 12.0, 0.0, 0.25,
-            key="eq_bass",
-        ),
-        st.slider(
-            "Low Mids (250–2000 Hz)",
-            -12.0, 12.0, 0.0, 0.25,
-            key="eq_low_mids",
-        ),
-        st.slider(
-            "High Mids (2000–4000 Hz)",
-            -12.0, 12.0, 0.0, 0.25,
-            key="eq_high_mids",
-        ),
-        st.slider(
-            "Presence (4000–6000 Hz)",
-            -12.0, 12.0, 0.0, 0.25,
-            key="eq_presence",
-        ),
-        st.slider(
-            "Brilliance (6000–16000 Hz)",
-            -12.0, 12.0, 0.0, 0.25,
-            key="eq_brilliance",
-        ),
-    ]
+# --- PROCESAMIENTO CENTRAL ---
+if archivo_a_procesar is not None:
+    try:
+        # Extraemos la frecuencia original y los datos de amplitud del wav
+        fs_original, audio_data = wavfile.read(archivo_a_procesar)
+        
+        # Si la pista es estereo (2 canales), promediamos para volverla mono y tener una sola secuencia x[n]
+        if len(audio_data.shape) > 1:
+            audio_data = audio_data.mean(axis=1)
+            
+        duracion_total = len(audio_data) / fs_original
+        
+        # Recortamos exactamente las muestras de la ventana seleccionada
+        muestra_inicio = int(inicio_seg * fs_original)
+        muestra_fin = int(min(fin_seg, duracion_total) * fs_original) 
+        
+        # SEÑAL 1: x[n] (Entrada original)
+        x_n = audio_data[muestra_inicio:muestra_fin]
+        
+        st.subheader("🎵 Señal de Entrada: x[n] (Original)")
+        st.write(f"**Fs original:** {fs_original} Hz")
+        st.audio(x_n, sample_rate=fs_original)
+        st.divider()
 
+        # SEÑAL 2: y[n] (Salida del conversor, ANTES de ecualizar)
+        # Aplicamos la expansion y decimacion primero, como manda el diagrama de bloques
+        y_n = dsp.cambiar_tasa(x_n, factor_L, factor_M)
+        fs_intermedia = int(fs_original * factor_L / factor_M)
+        
+        st.subheader("⚙️ Señal Intermedia: y[n] (Remuestreada, sin EQ)")
+        st.write(f"**Fs modificada:** {fs_intermedia} Hz")
+        # Reproductor opcional para escuchar como el anti-alias corta los agudos al decimar
+        st.audio(y_n.astype(np.int16), sample_rate=fs_intermedia)
+        st.divider()
 
-# ============================================================
-# 3. VALIDACIÓN Y RECORTE
-# ============================================================
-if fin_seg <= inicio_seg:
-    detener_con_error(
-        "La ventana seleccionada debe tener una duración mayor que cero."
-    )
+        # SEÑAL 3: z[n] (Salida final del ecualizador)
+        ganancias = [sub_bass, bass, low_mids, high_mids, presence, brilliance]
+        
+        # El ecualizador ahora trabaja sobre la fs_intermedia, lo cual es matematicamente correcto
+        z_n = dsp.procesar_ecualizador(y_n, fs_intermedia, ganancias)
+        
+        # Normalizamos la señal final para evitar saturacion (clipping) en la tarjeta de sonido
+        if np.max(np.abs(z_n)) > 0:
+            z_n = z_n / np.max(np.abs(z_n)) * 32767
+        z_n = z_n.astype(np.int16)
+        
+        st.subheader("🎧 Señal de Salida: z[n] (Final Ecualizada)")
+        st.write("Esta es la señal que llega al altavoz, con cambio de tasa y realce frecuencial.")
+        st.audio(z_n, sample_rate=fs_intermedia)
+        st.divider()
 
-muestra_inicio = int(round(inicio_seg * fs_original))
-muestra_fin = int(round(fin_seg * fs_original))
-muestra_inicio = max(0, min(muestra_inicio, audio_completo.size - 1))
-muestra_fin = max(muestra_inicio + 1, min(muestra_fin, audio_completo.size))
+        # --- ZONA DE GRAFICAS ---
+        tab_tiempo, tab_frecuencia = st.tabs(["⏱️ Dominio del Tiempo", "📊 Dominio de la Frecuencia"])
+        
+        with tab_tiempo:
+            st.header("Analisis en el Dominio del Tiempo")
+            vista_tiempo = st.radio(
+                "Modo de visualizacion:", 
+                ["Vista Macro (Envolvente continua)", "Vista Micro (Muestras discretas stem)"], 
+                horizontal=True
+            )
+            
+            # Pasamos las tres señales a la funcion de graficas para visualizar cada etapa
+            fig_tiempo = dsp.generar_graficas_tiempo(x_n, y_n, z_n, modo=vista_tiempo)
+            st.pyplot(fig_tiempo)
+            
+            with st.expander("📚 Ver Teoria: Remuestreo L/M"):
+                st.write("Al pasar de x[n] a y[n], la señal atraviesa un filtro pasabajo con frecuencia de corte $\omega_c = \min(\pi/L, \pi/M)$.")
 
-x_n = audio_completo[muestra_inicio:muestra_fin].copy()
+        with tab_frecuencia:
+            st.header("Analisis Espectral")
+            
+            # Pasamos las tres señales para ver como el espectro muta en cada bloque
+            fig_frec = dsp.generar_graficas_frecuencia(x_n, y_n, z_n)
+            st.pyplot(fig_frec)
+            
+            with st.expander("📚 Ver Teoria: Efecto de las etapas"):
+                st.write("El espectro de y[n] muestra el encogimiento/expansion del eje de frecuencias por el remuestreo. El espectro de z[n] evidencia como los filtros IIR modificaron la magnitud (ganancia) en las bandas seleccionadas.")
+                
+    except Exception as e:
+        st.error(f"Error al procesar el audio. Asegurate de que el archivo no este corrupto. Detalles: {e}")
 
-if x_n.size < 32:
-    detener_con_error(
-        "La ventana es demasiado corta. Selecciona al menos 32 muestras."
-    )
-
-try:
-    L_reducido, M_reducido = dsp.reducir_factores(
-        factor_L,
-        factor_M,
-    )
-except (TypeError, ValueError) as error:
-    detener_con_error("Los factores L y M no son válidos.", error)
-
-muestras_salida_estimadas = int(
-    np.ceil(x_n.size * L_reducido / M_reducido)
-)
-
-if muestras_salida_estimadas > MAX_MUESTRAS_SALIDA:
-    detener_con_error(
-        "La configuración seleccionada generaría demasiadas muestras "
-        f"({muestras_salida_estimadas:,}). Reduce la ventana o el factor L."
-    )
-
-
-# ============================================================
-# 4. PROCESAMIENTO
-# ============================================================
-try:
-    with st.spinner("Procesando señal..."):
-        y_n, info_src = dsp.cambiar_tasa(
-            x_n,
-            factor_L,
-            factor_M,
-            num_taps=num_taps,
-            margen_corte=margen_corte,
-            devolver_info=True,
-        )
-
-        fs_salida = (
-            fs_original
-            * info_src["L_reducido"]
-            / info_src["M_reducido"]
-        )
-
-        z_n, estados_bandas = dsp.procesar_ecualizador(
-            y_n,
-            fs_salida,
-            ganancias,
-            devolver_info=True,
-        )
-
-        x_reproduccion, _ = dsp.normalizar_audio(x_n)
-        y_reproduccion, _ = dsp.normalizar_audio(y_n)
-        z_reproduccion, factor_normalizacion = dsp.normalizar_audio(z_n)
-
-except (
-    ValueError,
-    TypeError,
-    FloatingPointError,
-    MemoryError,
-) as error:
-    detener_con_error("Error durante el procesamiento DSP.", error)
-
-
-# ============================================================
-# 5. RESUMEN
-# ============================================================
-st.subheader("Resumen del procesamiento")
-
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Fs original", f"{fs_original:.0f} Hz")
-col2.metric("Fs de salida", f"{fs_salida:.2f} Hz")
-col3.metric("Nyquist de salida", f"{fs_salida / 2.0:.2f} Hz")
-col4.metric(
-    "Razón reducida",
-    f"{info_src['L_reducido']}/{info_src['M_reducido']}",
-)
-
-st.caption(
-    f"Ventana: {inicio_seg:.2f}–{fin_seg:.2f} s · "
-    f"Duración: {x_n.size / fs_original:.6f} s · "
-    f"Muestras de entrada: {x_n.size:,} · "
-    f"Muestras de salida: {y_n.size:,} · "
-    f"Factor de normalización de z[n]: {factor_normalizacion:.6g}"
-)
-
-
-# ============================================================
-# 6. REPRODUCCIÓN
-# ============================================================
-st.subheader("Señales del sistema")
-
-col_x, col_y, col_z = st.columns(3)
-
-with col_x:
-    st.markdown("#### x[n] — Original")
-    st.audio(
-        convertir_a_wav_bytes(x_reproduccion, fs_original),
-        format="audio/wav",
-    )
-
-with col_y:
-    st.markdown("#### y[n] — Remuestreada")
-    st.audio(
-        convertir_a_wav_bytes(y_reproduccion, fs_salida),
-        format="audio/wav",
-    )
-
-with col_z:
-    st.markdown("#### z[n] — Ecualizada")
-    st.audio(
-        convertir_a_wav_bytes(z_reproduccion, fs_salida),
-        format="audio/wav",
-    )
-
-if fs_salida > 192000:
-    st.warning(
-        "La frecuencia de salida es superior a 192 kHz. Algunos navegadores "
-        "podrían no reproducirla, aunque el procesamiento y la descarga "
-        "siguen siendo válidos."
-    )
-
-st.download_button(
-    "Descargar señal procesada z[n]",
-    data=convertir_a_wav_bytes(z_reproduccion, fs_salida),
-    file_name="senal_procesada_z.wav",
-    mime="audio/wav",
-)
-
-
-# ============================================================
-# 7. DISPONIBILIDAD DE BANDAS
-# ============================================================
-st.subheader("Disponibilidad real de las bandas")
-
-st.dataframe(
-    estados_bandas,
-    width="stretch",
-    hide_index=True,
-)
-
-for estado in estados_bandas:
-    if estado["Estado"] != "Completa":
-        st.warning(f"{estado['Banda']}: {estado['Observación']}")
-
-
-# ============================================================
-# 8. GRÁFICAS
-# ============================================================
-tab_tiempo, tab_frecuencia, tab_respuesta = st.tabs(
-    [
-        "⏱️ Dominio del tiempo",
-        "📊 Dominio de la frecuencia",
-        "🎚️ Respuesta del ecualizador",
-    ]
-)
-
-with tab_tiempo:
-    modo_tiempo = st.radio(
-        "Modo de visualización",
-        ["Vista completa", "Detalle de muestras"],
-        horizontal=True,
-        key="modo_tiempo",
-    )
-
-    figura_tiempo = dsp.generar_graficas_tiempo(
-        x_n,
-        y_n,
-        z_n,
-        fs_original,
-        fs_salida,
-        fs_salida,
-        modo=modo_tiempo,
-        inicio_detalle_s=min(
-            1.0,
-            max(0.0, (fin_seg - inicio_seg) / 2.0),
-        ),
-        muestras_detalle=100,
-    )
-    st.pyplot(figura_tiempo, clear_figure=True)
-
-with tab_frecuencia:
-    modo_frecuencia = st.radio(
-        "Eje de frecuencia",
-        [
-            "Frecuencia digital normalizada",
-            "Frecuencia física [Hz]",
-        ],
-        horizontal=True,
-        key="modo_frecuencia",
-    )
-
-    figura_frecuencia = dsp.generar_graficas_frecuencia(
-        x_n,
-        y_n,
-        z_n,
-        fs_original,
-        fs_salida,
-        fs_salida,
-        modo=modo_frecuencia,
-        minimo_db=-120.0,
-        frecuencia_maxima_hz=min(
-            fs_original / 2.0,
-            fs_salida / 2.0,
-        ),
-    )
-    st.pyplot(figura_frecuencia, clear_figure=True)
-
-with tab_respuesta:
-    figura_respuesta = dsp.generar_respuesta_ecualizador(
-        fs_salida,
-        ganancias,
-    )
-    st.pyplot(figura_respuesta, clear_figure=True)
-
-    if all(abs(valor) < 1e-12 for valor in ganancias):
-        metricas = dsp.metricas_transparencia(y_n, z_n)
-        st.success(
-            "Todas las ganancias están en 0 dB: "
-            "el ecualizador es transparente."
-        )
-        st.json(metricas)
+else:
+    st.info(" Sube o selecciona un archivo en el panel izquierdo para arrancar el sistema.")
